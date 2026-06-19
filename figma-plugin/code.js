@@ -126,6 +126,69 @@ figma.ui.onmessage = async (msg) => {
         return { success: true, result: result !== undefined && result !== null ? result : null };
       }
 
+      case "BATCH_CLONE": {
+        const template = await figma.getNodeByIdAsync(params.nodeId);
+        if (!template) throw new Error(`Node not found: ${params.nodeId}`);
+
+        let parent;
+        if (params.parentId) {
+          parent = await figma.getNodeByIdAsync(params.parentId);
+          if (!parent) throw new Error(`Parent not found: ${params.parentId}`);
+          if (!("appendChild" in parent)) throw new Error(`Parent does not support appendChild`);
+        } else {
+          parent = figma.currentPage;
+        }
+
+        const count = params.count ?? 1;
+        const gap = params.gap ?? 16;
+        const offsetX = params.offsetX ?? 0;
+        const offsetY = params.offsetY ?? (template.height + gap);
+        const baseX = params.startX ?? template.x;
+        const baseY = params.startY ?? (template.y + offsetY);
+
+        const nodes = [];
+        for (let i = 0; i < count; i++) {
+          const clone = template.clone();
+          parent.appendChild(clone);
+          clone.x = baseX + i * offsetX;
+          clone.y = baseY + i * offsetY;
+          nodes.push({ nodeId: clone.id, name: clone.name, x: clone.x, y: clone.y });
+        }
+        return { success: true, created: count, nodes };
+      }
+
+      case "GET_NODE_TREE": {
+        const maxDepth = params.depth ?? 3;
+
+        function summarize(node, depth) {
+          const out = { id: node.id, name: node.name, type: node.type };
+          if ("absoluteBoundingBox" in node && node.absoluteBoundingBox) {
+            out.bounds = node.absoluteBoundingBox;
+          }
+          if (depth < maxDepth && "children" in node && node.children.length > 0) {
+            out.children = node.children.map(c => summarize(c, depth + 1));
+            out.childCount = node.children.length;
+          } else if ("children" in node) {
+            out.childCount = node.children.length;
+          }
+          return out;
+        }
+
+        if (params.nodeId) {
+          const node = await figma.getNodeByIdAsync(params.nodeId);
+          if (!node) throw new Error(`Node not found: ${params.nodeId}`);
+          return summarize(node, 0);
+        }
+
+        const page = figma.currentPage;
+        return {
+          pageId: page.id,
+          pageName: page.name,
+          childCount: page.children.length,
+          children: page.children.map(c => summarize(c, 1)),
+        };
+      }
+
       default:
         throw new Error(`Unknown command: ${type}`);
     }

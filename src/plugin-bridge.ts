@@ -71,8 +71,8 @@ export class PluginBridge {
     return new Promise((resolve, reject) => {
       const timeout = setTimeout(() => {
         this.pending.delete(id);
-        reject(new Error(`Plugin command '${type}' timed out after 15s`));
-      }, 15_000);
+        reject(new Error(`Plugin command '${type}' timed out after 30s`));
+      }, 30_000);
 
       this.pending.set(id, { resolve, reject, timeout });
       this.client!.send(JSON.stringify({ id, type, params }));

@@ -1,6 +1,7 @@
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import type { FigmaRestClient } from "../figma-rest.js";
+import type { PluginBridge } from "../plugin-bridge.js";
 
 // ── Helpers ────────────────────────────────────────────────────────────────────
 
@@ -54,14 +55,49 @@ function summarizePage(page: any) {
 
 // ── Tool registration ──────────────────────────────────────────────────────────
 
-export function registerReadTools(server: McpServer, figma: FigmaRestClient): void {
+export function registerReadTools(server: McpServer, figma: FigmaRestClient, bridge?: PluginBridge): void {
+  /**
+   * get_node_tree
+   * Reads the current page structure DIRECTLY from the live Figma plugin — no REST API call.
+   * Much faster than get_page_structure when the plugin is connected.
+   */
+  server.tool(
+    "get_node_tree",
+    [
+      "⚡ FAST — Read current page structure directly from the live Figma plugin (no REST API).",
+      "Use this instead of get_page_structure when the bridge plugin is connected.",
+      "Returns the node tree of the currently open Figma page up to the specified depth.",
+      "Optionally scope to a specific node by node_id.",
+    ].join(" "),
+    {
+      depth: z.number().int().min(1).max(6).optional().describe("Tree depth to traverse (default: 3)"),
+      node_id: z.string().optional().describe("Scope to a specific node ID (default: entire current page)"),
+    },
+    async ({ depth = 3, node_id }) => {
+      if (!bridge?.isConnected) {
+        return {
+          content: [{
+            type: "text" as const,
+            text: JSON.stringify({ error: "Bridge Plugin not connected. Use get_page_structure (REST) instead, or connect the plugin." }),
+          }],
+        };
+      }
+      const result = await bridge.sendCommand("GET_NODE_TREE", { depth, nodeId: node_id });
+      return { content: [{ type: "text" as const, text: JSON.stringify(result, null, 2) }] };
+    }
+  );
+
   /**
    * get_page_structure
-   * GWS-style: returns compact hierarchy, not raw 1.7 MB JSON
+   * GWS-style: returns compact hierarchy. Results cached 30s to avoid repeated full-file downloads.
    */
   server.tool(
     "get_page_structure",
-    "Get the page/frame hierarchy of a Figma file. Returns a compact, AI-readable summary.",
+    [
+      "Get the page/frame hierarchy of a Figma file via REST API.",
+      "Results are cached for 30 seconds — repeated calls are instant.",
+      "Prefer get_node_tree when the bridge plugin is connected (no network call).",
+    ].join(" "),
     {
       file_key: z.string().describe("Figma file key — found in the URL: figma.com/file/FILE_KEY/..."),
       page_name: z.string().optional().describe("Filter by page name (partial match). Omit to return all pages."),
@@ -90,12 +126,11 @@ export function registerReadTools(server: McpServer, figma: FigmaRestClient): vo
 
   /**
    * get_all_text
-   * Extracts every text node with its path, content, and type style.
-   * Use this to read copy/labels without browsing Figma manually.
+   * Extracts every text node. File cached 30s.
    */
   server.tool(
     "get_all_text",
-    "Extract all text nodes from a Figma file (or scoped to a page/frame). Returns path + content + style per node.",
+    "Extract all text nodes from a Figma file (or scoped to a page/frame). Returns path + content + style per node. File is cached for 30s.",
     {
       file_key: z.string().describe("Figma file key"),
       page_name: z.string().optional().describe("Scope to a specific page (partial match)"),
@@ -132,11 +167,10 @@ export function registerReadTools(server: McpServer, figma: FigmaRestClient): vo
 
   /**
    * list_components
-   * Lists published/local components — useful before swap_component writes.
    */
   server.tool(
     "list_components",
-    "List all components in a Figma file with their names, IDs, and descriptions.",
+    "List all components in a Figma file with their names, IDs, and descriptions. File is cached for 30s.",
     {
       file_key: z.string().describe("Figma file key"),
     },
@@ -163,7 +197,6 @@ export function registerReadTools(server: McpServer, figma: FigmaRestClient): vo
 
   /**
    * get_design_tokens
-   * Extracts Figma Variables + Styles into an AI-ready token map.
    */
   server.tool(
     "get_design_tokens",
@@ -180,7 +213,6 @@ export function registerReadTools(server: McpServer, figma: FigmaRestClient): vo
       const collections: Record<string, any> = vars.variableCollections ?? {};
       const variables: Record<string, any> = vars.variables ?? {};
 
-      // Group tokens by collection name
       const tokensByCollection: Record<string, any[]> = {};
       for (const [, variable] of Object.entries(variables)) {
         const v = variable as any;
@@ -206,12 +238,10 @@ export function registerReadTools(server: McpServer, figma: FigmaRestClient): vo
 
   /**
    * find_node
-   * Name-based search (not ID-based) — GWS CLI principle.
-   * Returns node IDs needed for write operations.
    */
   server.tool(
     "find_node",
-    "Find nodes by name in a Figma file. Returns node IDs required for write tools (update_text, set_fill, etc.).",
+    "Find nodes by name in a Figma file. Returns node IDs required for write tools. File is cached for 30s — call once then reuse IDs.",
     {
       file_key: z.string().describe("Figma file key"),
       node_name: z.string().describe("Node name to search (partial, case-insensitive)"),

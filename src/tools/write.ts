@@ -8,8 +8,95 @@ function toText(result: unknown): string {
 
 export function registerWriteTools(server: McpServer, bridge: PluginBridge): void {
   /**
+   * execute_js — FAST PATH. Always prefer over individual tools for 2+ operations.
+   */
+  server.tool(
+    "execute_js",
+    [
+      "⚡ FAST PATH — ALWAYS use this instead of calling individual tools (clone_node, update_text, etc.) more than once.",
+      "A single execute_js replaces N sequential tool calls and eliminates all round-trip overhead.",
+      "",
+      "RULE: If the task requires 2 or more plugin operations, use execute_js — not individual tools.",
+      "",
+      "When to use execute_js (not individual tools):",
+      "  - Clone / duplicate 2+ nodes",
+      "  - Update text in multiple nodes",
+      "  - Create a frame and add children",
+      "  - Any sequence of 2+ Figma API calls",
+      "",
+      "Example — clone a list row 5 times with 8px gap:",
+      "  const tmpl = await figma.getNodeByIdAsync('123:456');",
+      "  const parent = await figma.getNodeByIdAsync('789:012');",
+      "  const ids = [];",
+      "  for (let i = 0; i < 5; i++) {",
+      "    const c = tmpl.clone();",
+      "    parent.appendChild(c);",
+      "    c.y = tmpl.y + (i + 1) * (tmpl.height + 8);",
+      "    ids.push(c.id);",
+      "  }",
+      "  return ids;",
+      "",
+      "Example — update text in 3 nodes at once:",
+      "  const data = [['id1','Label A'],['id2','Label B'],['id3','Label C']];",
+      "  for (const [id, text] of data) {",
+      "    const n = await figma.getNodeByIdAsync(id);",
+      "    await figma.loadFontAsync(n.fontName);",
+      "    n.characters = text;",
+      "  }",
+      "  return 'done';",
+      "",
+      "The `figma` global is available. Code runs async-compatible.",
+      "Return a value to get it back as JSON. Throw to signal an error.",
+    ].join("\n"),
+    {
+      code: z.string().describe(
+        "JS code to execute in the Figma plugin sandbox. `figma` is injected. Use `return` to send back a result."
+      ),
+    },
+    async ({ code }) => {
+      const result = await bridge.sendCommand("EXECUTE_JS", { code });
+      return { content: [{ type: "text" as const, text: toText(result) }] };
+    }
+  );
+
+  /**
+   * batch_clone
+   * Clone a node N times in a single round-trip — replaces repeated clone_node calls.
+   */
+  server.tool(
+    "batch_clone",
+    [
+      "Clone a node N times in ONE plugin round-trip.",
+      "Use this instead of calling clone_node repeatedly.",
+      "Clones are stacked below the template by default (offset_y = node height + gap).",
+    ].join(" "),
+    {
+      node_id: z.string().describe("Template node ID to clone"),
+      count: z.number().int().min(1).describe("Number of clones to create"),
+      parent_id: z.string().optional().describe("Parent frame/group to place clones into (default: current page)"),
+      offset_x: z.number().optional().describe("X offset per clone (default: 0)"),
+      offset_y: z.number().optional().describe("Y offset per clone (default: node height + gap)"),
+      gap: z.number().optional().describe("Gap in pixels between clones (default: 16)"),
+      start_x: z.number().optional().describe("X of first clone (default: same as template)"),
+      start_y: z.number().optional().describe("Y of first clone (default: below template)"),
+    },
+    async ({ node_id, count, parent_id, offset_x, offset_y, gap, start_x, start_y }) => {
+      const result = await bridge.sendCommand("BATCH_CLONE", {
+        nodeId: node_id,
+        count,
+        parentId: parent_id,
+        offsetX: offset_x,
+        offsetY: offset_y,
+        gap,
+        startX: start_x,
+        startY: start_y,
+      });
+      return { content: [{ type: "text" as const, text: toText(result) }] };
+    }
+  );
+
+  /**
    * plugin_status
-   * Always check this before calling write tools.
    */
   server.tool(
     "plugin_status",
@@ -33,7 +120,7 @@ export function registerWriteTools(server: McpServer, bridge: PluginBridge): voi
    */
   server.tool(
     "update_text",
-    "Update the text content of a TEXT node. Get the node_id first with find_node.",
+    "Update the text content of a single TEXT node. For multiple nodes, use execute_js instead.",
     {
       node_id: z.string().describe("Figma node ID (from find_node)"),
       new_text: z.string().describe("New text content"),
@@ -49,7 +136,7 @@ export function registerWriteTools(server: McpServer, bridge: PluginBridge): voi
    */
   server.tool(
     "set_fill",
-    "Set the fill color of a node. Accepts hex color (e.g. #FF5A00 or #FF5A00CC with alpha).",
+    "Set the fill color of a single node. For multiple nodes, use execute_js instead.",
     {
       node_id: z.string().describe("Figma node ID"),
       hex_color: z.string().describe("Hex color: #RRGGBB or #RRGGBBAA"),
@@ -65,7 +152,7 @@ export function registerWriteTools(server: McpServer, bridge: PluginBridge): voi
    */
   server.tool(
     "create_frame",
-    "Create a new empty frame on the current Figma page.",
+    "Create a new empty frame on the current Figma page. To also add children, use execute_js instead.",
     {
       name: z.string().describe("Frame name"),
       width: z.number().describe("Width in pixels"),
@@ -84,7 +171,7 @@ export function registerWriteTools(server: McpServer, bridge: PluginBridge): voi
    */
   server.tool(
     "rename_node",
-    "Rename a node in Figma.",
+    "Rename a single node in Figma. For multiple nodes, use execute_js instead.",
     {
       node_id: z.string().describe("Figma node ID"),
       new_name: z.string().describe("New name"),
@@ -100,7 +187,7 @@ export function registerWriteTools(server: McpServer, bridge: PluginBridge): voi
    */
   server.tool(
     "move_node",
-    "Move a node to new absolute coordinates within the current page.",
+    "Move a single node to new coordinates. For multiple nodes, use execute_js instead.",
     {
       node_id: z.string().describe("Figma node ID"),
       x: z.number().describe("New X position"),
@@ -117,7 +204,7 @@ export function registerWriteTools(server: McpServer, bridge: PluginBridge): voi
    */
   server.tool(
     "resize_node",
-    "Resize a node (frame, component, shape) in Figma.",
+    "Resize a single node. For multiple nodes, use execute_js instead.",
     {
       node_id: z.string().describe("Figma node ID"),
       width: z.number().describe("New width in pixels"),
@@ -149,12 +236,12 @@ export function registerWriteTools(server: McpServer, bridge: PluginBridge): voi
    */
   server.tool(
     "clone_node",
-    "Clone (duplicate) any Figma node — frame, instance, component, group, etc. Optionally place into a parent frame and set position.",
+    "Clone a single node. For cloning 2+ nodes, use batch_clone or execute_js instead.",
     {
       node_id: z.string().describe("Figma node ID to clone"),
-      parent_id: z.string().optional().describe("Parent frame/group node ID to place the clone into (default: current page)"),
-      x: z.number().optional().describe("X position of the clone (relative to parent if parent_id given)"),
-      y: z.number().optional().describe("Y position of the clone (relative to parent if parent_id given)"),
+      parent_id: z.string().optional().describe("Parent frame/group node ID (default: current page)"),
+      x: z.number().optional().describe("X position of the clone"),
+      y: z.number().optional().describe("Y position of the clone"),
     },
     async ({ node_id, parent_id, x, y }) => {
       const result = await bridge.sendCommand("CLONE_NODE", { nodeId: node_id, parentId: parent_id, x, y });
@@ -167,7 +254,7 @@ export function registerWriteTools(server: McpServer, bridge: PluginBridge): voi
    */
   server.tool(
     "create_instance",
-    "Create an instance of a Figma COMPONENT node. Use list_components to find component IDs.",
+    "Create a single instance of a Figma COMPONENT. For multiple instances, use execute_js instead.",
     {
       component_id: z.string().describe("Component node ID (must be type COMPONENT, not INSTANCE)"),
       parent_id: z.string().optional().describe("Parent frame/group node ID (default: current page)"),
@@ -181,38 +268,11 @@ export function registerWriteTools(server: McpServer, bridge: PluginBridge): voi
   );
 
   /**
-   * execute_js
-   */
-  server.tool(
-    "execute_js",
-    [
-      "Execute arbitrary Figma Plugin API code in the plugin sandbox.",
-      "The `figma` global is available. Code runs async-compatible.",
-      "Use this for complex multi-step operations that cannot be expressed with individual tools.",
-      "Examples:",
-      "  - Find all nodes by name pattern and batch-update properties",
-      "  - Traverse the node tree and collect data",
-      "  - Create multiple nodes and wire them together in one call",
-      "Return a value to get it back as JSON. Throw to signal an error.",
-      "Available globals: figma, figma.currentPage, figma.getNodeByIdAsync(), figma.createFrame(), etc.",
-    ].join("\n"),
-    {
-      code: z.string().describe(
-        "JS code string to execute. The `figma` object is injected. Use `return` to send back a result."
-      ),
-    },
-    async ({ code }) => {
-      const result = await bridge.sendCommand("EXECUTE_JS", { code });
-      return { content: [{ type: "text" as const, text: toText(result) }] };
-    }
-  );
-
-  /**
    * append_child
    */
   server.tool(
     "append_child",
-    "Reparent a node — move it into a different frame or group. Optionally set position after reparenting.",
+    "Reparent a single node into a different frame or group. For multiple nodes, use execute_js instead.",
     {
       node_id: z.string().describe("Node ID to reparent"),
       parent_id: z.string().describe("Target parent frame/group node ID"),

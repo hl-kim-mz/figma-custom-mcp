@@ -1,6 +1,8 @@
 export class FigmaRestClient {
   private token: string;
   private baseUrl = "https://api.figma.com/v1";
+  private fileCache = new Map<string, { data: any; ts: number }>();
+  private FILE_TTL = 30_000; // 30 s — avoids repeated full-file downloads
 
   constructor(token: string) {
     this.token = token;
@@ -17,8 +19,16 @@ export class FigmaRestClient {
     return res.json() as Promise<T>;
   }
 
-  getFile(fileKey: string) {
-    return this.apiFetch<any>(`/files/${fileKey}`);
+  async getFile(fileKey: string): Promise<any> {
+    const cached = this.fileCache.get(fileKey);
+    if (cached && Date.now() - cached.ts < this.FILE_TTL) return cached.data;
+    const data = await this.apiFetch<any>(`/files/${fileKey}`);
+    this.fileCache.set(fileKey, { data, ts: Date.now() });
+    return data;
+  }
+
+  invalidateFile(fileKey: string): void {
+    this.fileCache.delete(fileKey);
   }
 
   getFileNodes(fileKey: string, nodeIds: string[]) {

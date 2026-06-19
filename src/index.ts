@@ -24,7 +24,7 @@ const bridge = new PluginBridge(WS_PORT);
 bridge.start();
 
 // Register all tools
-registerReadTools(server, figmaClient);
+registerReadTools(server, figmaClient, bridge);
 registerWriteTools(server, bridge);
 
 // Connect via stdio transport (used by Claude Code MCP)
