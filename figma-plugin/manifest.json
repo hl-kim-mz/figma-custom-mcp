@@ -1,0 +1,12 @@
+{
+  "name": "MCP Bridge",
+  "id": "figma-custom-mcp-bridge-2025",
+  "api": "1.0.0",
+  "main": "code.js",
+  "ui": "ui.html",
+  "editorType": ["figma", "figjam"],
+  "networkAccess": {
+    "allowedDomains": ["none"],
+    "devAllowedDomains": ["ws://localhost:3055"]
+  }
+}

@@ -1,0 +1,92 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <style>
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      margin: 0;
+      padding: 16px;
+      background: #fff;
+      color: #333;
+    }
+    h3 { margin: 0 0 10px; font-size: 14px; }
+    .badge {
+      display: inline-block;
+      padding: 4px 10px;
+      border-radius: 12px;
+      font-size: 12px;
+      font-weight: 600;
+    }
+    .ok   { background: #d4edda; color: #155724; }
+    .err  { background: #f8d7da; color: #721c24; }
+    .info { background: #fff3cd; color: #856404; }
+    #log  { margin-top: 10px; font-size: 11px; color: #888; max-height: 80px; overflow-y: auto; }
+  </style>
+</head>
+<body>
+  <h3>MCP Bridge</h3>
+  <span id="badge" class="badge info">Connecting…</span>
+  <div id="log"></div>
+
+  <script>
+    const WS_PORT = 3055;
+    let ws = null;
+    let cmdCount = 0;
+    const badge = document.getElementById("badge");
+    const log = document.getElementById("log");
+
+    function addLog(msg) {
+      const line = document.createElement("div");
+      line.textContent = `${new Date().toLocaleTimeString()} ${msg}`;
+      log.prepend(line);
+      if (log.children.length > 20) log.lastChild.remove();
+    }
+
+    function setStatus(text, cls) {
+      badge.textContent = text;
+      badge.className = "badge " + cls;
+    }
+
+    function connect() {
+      ws = new WebSocket("ws://localhost:" + WS_PORT);
+
+      ws.onopen = () => {
+        setStatus("Connected ✓", "ok");
+        addLog("Connected to MCP server");
+      };
+
+      ws.onclose = () => {
+        setStatus("Disconnected — retrying…", "err");
+        addLog("Disconnected");
+        setTimeout(connect, 3000);
+      };
+
+      ws.onerror = () => {
+        setStatus("Error (MCP server running?)", "err");
+      };
+
+      // Receive command from MCP server → forward to plugin code
+      ws.onmessage = (event) => {
+        try {
+          const msg = JSON.parse(event.data);
+          cmdCount++;
+          addLog(`← ${msg.type} #${cmdCount}`);
+          parent.postMessage({ pluginMessage: msg }, "*");
+        } catch {}
+      };
+    }
+
+    // Receive result from plugin code → forward to MCP server
+    window.onmessage = (event) => {
+      const msg = event.data?.pluginMessage;
+      if (!msg) return;
+      if (ws && ws.readyState === WebSocket.OPEN) {
+        ws.send(JSON.stringify(msg));
+        addLog(`→ ${msg.error ? "ERR" : "OK"} id=${msg.id?.slice(0, 8)}`);
+      }
+    };
+
+    connect();
+  </script>
+</body>
+</html>
