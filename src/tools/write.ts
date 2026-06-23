@@ -2,286 +2,440 @@ import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import type { PluginBridge } from "../plugin-bridge.js";
 
+// Shared schema fragments
+const batchCommon = {
+  file_key: z.string().describe(
+    "Figma file key from the URL: figma.com/file/FILE_KEY/..."
+  ),
+  scope_node_id: z.string().describe(
+    "ID of the scope root node — must be FRAME or SECTION. All target nodes must be nested under this node in the Layers panel."
+  ),
+};
+
+const PaintSchema = z
+  .object({ type: z.string() })
+  .passthrough()
+  .describe("Figma Paint object (SOLID, GRADIENT_LINEAR, IMAGE, etc.)");
+
+const EffectSchema = z
+  .object({ type: z.string() })
+  .passthrough()
+  .describe("Figma Effect object (DROP_SHADOW, INNER_SHADOW, LAYER_BLUR, BACKGROUND_BLUR)");
+
 function toText(result: unknown): string {
   return JSON.stringify(result) ?? '{"error":"Plugin returned undefined result"}';
 }
 
-export function registerWriteTools(server: McpServer, bridge: PluginBridge): void {
-  /**
-   * execute_js — FAST PATH. Always prefer over individual tools for 2+ operations.
-   */
-  server.tool(
-    "execute_js",
-    [
-      "⚡ FAST PATH — ALWAYS use this instead of calling individual tools (clone_node, update_text, etc.) more than once.",
-      "A single execute_js replaces N sequential tool calls and eliminates all round-trip overhead.",
-      "",
-      "RULE: If the task requires 2 or more plugin operations, use execute_js — not individual tools.",
-      "",
-      "When to use execute_js (not individual tools):",
-      "  - Clone / duplicate 2+ nodes",
-      "  - Update text in multiple nodes",
-      "  - Create a frame and add children",
-      "  - Any sequence of 2+ Figma API calls",
-      "",
-      "Example — clone a list row 5 times with 8px gap:",
-      "  const tmpl = await figma.getNodeByIdAsync('123:456');",
-      "  const parent = await figma.getNodeByIdAsync('789:012');",
-      "  const ids = [];",
-      "  for (let i = 0; i < 5; i++) {",
-      "    const c = tmpl.clone();",
-      "    parent.appendChild(c);",
-      "    c.y = tmpl.y + (i + 1) * (tmpl.height + 8);",
-      "    ids.push(c.id);",
-      "  }",
-      "  return ids;",
-      "",
-      "Example — update text in 3 nodes at once:",
-      "  const data = [['id1','Label A'],['id2','Label B'],['id3','Label C']];",
-      "  for (const [id, text] of data) {",
-      "    const n = await figma.getNodeByIdAsync(id);",
-      "    await figma.loadFontAsync(n.fontName);",
-      "    n.characters = text;",
-      "  }",
-      "  return 'done';",
-      "",
-      "The `figma` global is available. Code runs async-compatible.",
-      "Return a value to get it back as JSON. Throw to signal an error.",
-    ].join("\n"),
-    {
-      code: z.string().describe(
-        "JS code to execute in the Figma plugin sandbox. `figma` is injected. Use `return` to send back a result."
-      ),
-    },
-    async ({ code }) => {
-      const result = await bridge.sendCommand("EXECUTE_JS", { code });
-      return { content: [{ type: "text" as const, text: toText(result) }] };
-    }
-  );
+export function registerWriteTools(
+  server: McpServer,
+  bridge: PluginBridge,
+  options: { unsafeMode?: boolean } = {}
+): void {
+  const { unsafeMode = false } = options;
 
-  /**
-   * batch_clone
-   * Clone a node N times in a single round-trip — replaces repeated clone_node calls.
-   */
-  server.tool(
-    "batch_clone",
-    [
-      "Clone a node N times in ONE plugin round-trip.",
-      "Use this instead of calling clone_node repeatedly.",
-      "Clones are stacked below the template by default (offset_y = node height + gap).",
-    ].join(" "),
-    {
-      node_id: z.string().describe("Template node ID to clone"),
-      count: z.number().int().min(1).describe("Number of clones to create"),
-      parent_id: z.string().optional().describe("Parent frame/group to place clones into (default: current page)"),
-      offset_x: z.number().optional().describe("X offset per clone (default: 0)"),
-      offset_y: z.number().optional().describe("Y offset per clone (default: node height + gap)"),
-      gap: z.number().optional().describe("Gap in pixels between clones (default: 16)"),
-      start_x: z.number().optional().describe("X of first clone (default: same as template)"),
-      start_y: z.number().optional().describe("Y of first clone (default: below template)"),
-    },
-    async ({ node_id, count, parent_id, offset_x, offset_y, gap, start_x, start_y }) => {
-      const result = await bridge.sendCommand("BATCH_CLONE", {
-        nodeId: node_id,
-        count,
-        parentId: parent_id,
-        offsetX: offset_x,
-        offsetY: offset_y,
-        gap,
-        startX: start_x,
-        startY: start_y,
-      });
-      return { content: [{ type: "text" as const, text: toText(result) }] };
-    }
-  );
-
-  /**
-   * plugin_status
-   */
+  // ── plugin_status ──────────────────────────────────────────────────────────
   server.tool(
     "plugin_status",
     "Check if the Figma Bridge Plugin is connected and ready for write operations.",
     {},
     async () => ({
-      content: [{
-        type: "text" as const,
-        text: JSON.stringify({
-          connected: bridge.isConnected,
-          message: bridge.isConnected
-            ? "Bridge Plugin connected — write tools are available."
-            : "Not connected. Open Figma, run the Bridge Plugin from Plugins > Development, then retry.",
-        }),
-      }],
+      content: [
+        {
+          type: "text" as const,
+          text: JSON.stringify({
+            connected: bridge.isConnected,
+            unsafeMode,
+            message: bridge.isConnected
+              ? "Bridge Plugin connected — write tools are available."
+              : "Not connected. Open Figma, run the Bridge Plugin from Plugins > Development, then retry.",
+          }),
+        },
+      ],
     })
   );
 
-  /**
-   * update_text
-   */
+  // ── get_file_key (diagnostic) ──────────────────────────────────────────────
   server.tool(
-    "update_text",
-    "Update the text content of a single TEXT node. For multiple nodes, use execute_js instead.",
+    "get_file_key",
+    "Get the actual figma.fileKey from the currently open Figma file via Bridge Plugin.",
+    {},
+    async () => {
+      const result = await bridge.sendCommand("GET_FILE_KEY", {});
+      return { content: [{ type: "text" as const, text: JSON.stringify(result) }] };
+    }
+  );
+
+  // ── batch_create_nodes ─────────────────────────────────────────────────────
+  server.tool(
+    "batch_create_nodes",
+    [
+      "Create multiple nodes in a single all-or-nothing batch.",
+      "All operations share the same scope root (file_key + scope_node_id).",
+      "If any operation fails preflight, zero mutations are applied.",
+      "Allowed create types: FRAME, TEXT, RECTANGLE, ELLIPSE, LINE, COMPONENT.",
+      "Parent must be FRAME, SECTION, or a local (non-library) COMPONENT/COMPONENT_SET.",
+    ].join(" "),
     {
-      node_id: z.string().describe("Figma node ID (from find_node)"),
-      new_text: z.string().describe("New text content"),
+      ...batchCommon,
+      operations: z
+        .array(
+          z.object({
+            type: z
+              .enum(["FRAME", "TEXT", "RECTANGLE", "ELLIPSE", "LINE", "COMPONENT"])
+              .describe("Node type to create"),
+            parent_node_id: z
+              .string()
+              .describe("Parent node ID — must be inside scope and satisfy parent policy"),
+            name: z.string().describe("Name for the new node"),
+            x: z.number().optional().describe("X position relative to parent"),
+            y: z.number().optional().describe("Y position relative to parent"),
+            width: z.number().optional().describe("Width in pixels"),
+            height: z.number().optional().describe("Height in pixels"),
+            characters: z
+              .string()
+              .optional()
+              .describe("Initial text content (TEXT nodes only)"),
+          })
+        )
+        .max(100)
+        .describe("Operations to execute — max 100"),
     },
-    async ({ node_id, new_text }) => {
-      const result = await bridge.sendCommand("UPDATE_TEXT", { nodeId: node_id, text: new_text });
+    async ({ file_key, scope_node_id, operations }) => {
+      const result = await bridge.sendCommand("BATCH_CREATE_NODES", {
+        fileKey: file_key,
+        scopeNodeId: scope_node_id,
+        operations,
+      });
       return { content: [{ type: "text" as const, text: toText(result) }] };
     }
   );
 
-  /**
-   * set_fill
-   */
+  // ── batch_create_instances ─────────────────────────────────────────────────
   server.tool(
-    "set_fill",
-    "Set the fill color of a single node. For multiple nodes, use execute_js instead.",
+    "batch_create_instances",
+    [
+      "Create multiple component instances in a single all-or-nothing batch.",
+      "Source component must be accessible (local scope component or already imported).",
+      "Library search/import is not performed — provide the exact component node ID.",
+      "Parent must be inside scope and satisfy parent policy.",
+    ].join(" "),
     {
-      node_id: z.string().describe("Figma node ID"),
-      hex_color: z.string().describe("Hex color: #RRGGBB or #RRGGBBAA"),
+      ...batchCommon,
+      operations: z
+        .array(
+          z.object({
+            source_component_node_id: z
+              .string()
+              .describe("Node ID of the source COMPONENT (not INSTANCE)"),
+            parent_node_id: z
+              .string()
+              .describe("Parent node ID — must be inside scope and satisfy parent policy"),
+            x: z.number().optional().describe("X position"),
+            y: z.number().optional().describe("Y position"),
+            component_properties: z
+              .record(z.string(), z.unknown())
+              .optional()
+              .describe("Initial component property values"),
+          })
+        )
+        .max(100)
+        .describe("Operations to execute — max 100"),
     },
-    async ({ node_id, hex_color }) => {
-      const result = await bridge.sendCommand("SET_FILL", { nodeId: node_id, hexColor: hex_color });
+    async ({ file_key, scope_node_id, operations }) => {
+      const result = await bridge.sendCommand("BATCH_CREATE_INSTANCES", {
+        fileKey: file_key,
+        scopeNodeId: scope_node_id,
+        operations,
+      });
       return { content: [{ type: "text" as const, text: toText(result) }] };
     }
   );
 
-  /**
-   * create_frame
-   */
+  // ── batch_update_geometry ──────────────────────────────────────────────────
   server.tool(
-    "create_frame",
-    "Create a new empty frame on the current Figma page. To also add children, use execute_js instead.",
+    "batch_update_geometry",
+    [
+      "Update position, size, and rotation of multiple nodes in a single all-or-nothing batch.",
+      "All target nodes must be inside the scope subtree.",
+      "INSTANCE geometry is allowed. Direct writes to INSTANCE internal children are forbidden.",
+    ].join(" "),
     {
-      name: z.string().describe("Frame name"),
-      width: z.number().describe("Width in pixels"),
-      height: z.number().describe("Height in pixels"),
-      x: z.number().optional().describe("X position (default 0)"),
-      y: z.number().optional().describe("Y position (default 0)"),
+      ...batchCommon,
+      operations: z
+        .array(
+          z.object({
+            node_id: z.string().describe("Target node ID — must be inside scope"),
+            x: z.number().optional().describe("New X position"),
+            y: z.number().optional().describe("New Y position"),
+            width: z.number().optional().describe("New width in pixels"),
+            height: z.number().optional().describe("New height in pixels"),
+            rotation: z.number().optional().describe("Rotation in degrees"),
+          })
+        )
+        .max(100)
+        .describe("Operations to execute — max 100"),
     },
-    async ({ name, width, height, x = 0, y = 0 }) => {
-      const result = await bridge.sendCommand("CREATE_FRAME", { name, width, height, x, y });
+    async ({ file_key, scope_node_id, operations }) => {
+      const result = await bridge.sendCommand("BATCH_UPDATE_GEOMETRY", {
+        fileKey: file_key,
+        scopeNodeId: scope_node_id,
+        operations,
+      });
       return { content: [{ type: "text" as const, text: toText(result) }] };
     }
   );
 
-  /**
-   * rename_node
-   */
+  // ── batch_update_auto_layout ───────────────────────────────────────────────
   server.tool(
-    "rename_node",
-    "Rename a single node in Figma. For multiple nodes, use execute_js instead.",
+    "batch_update_auto_layout",
+    [
+      "Update auto-layout properties on multiple FRAME nodes in a single all-or-nothing batch.",
+      "Target nodes must be FRAME type and inside the scope subtree.",
+    ].join(" "),
     {
-      node_id: z.string().describe("Figma node ID"),
-      new_name: z.string().describe("New name"),
+      ...batchCommon,
+      operations: z
+        .array(
+          z.object({
+            node_id: z.string().describe("Target FRAME node ID — must be inside scope"),
+            layout_mode: z
+              .enum(["NONE", "HORIZONTAL", "VERTICAL"])
+              .optional()
+              .describe("Auto-layout direction"),
+            primary_axis_align_items: z
+              .enum(["MIN", "CENTER", "MAX", "SPACE_BETWEEN"])
+              .optional()
+              .describe("Alignment on primary axis"),
+            counter_axis_align_items: z
+              .enum(["MIN", "CENTER", "MAX", "BASELINE"])
+              .optional()
+              .describe("Alignment on counter axis"),
+            item_spacing: z.number().optional().describe("Gap between items (px)"),
+            padding: z
+              .object({
+                top: z.number(),
+                right: z.number(),
+                bottom: z.number(),
+                left: z.number(),
+              })
+              .optional()
+              .describe("Padding on all sides"),
+          })
+        )
+        .max(100)
+        .describe("Operations to execute — max 100"),
     },
-    async ({ node_id, new_name }) => {
-      const result = await bridge.sendCommand("RENAME_NODE", { nodeId: node_id, name: new_name });
+    async ({ file_key, scope_node_id, operations }) => {
+      const result = await bridge.sendCommand("BATCH_UPDATE_AUTO_LAYOUT", {
+        fileKey: file_key,
+        scopeNodeId: scope_node_id,
+        operations,
+      });
       return { content: [{ type: "text" as const, text: toText(result) }] };
     }
   );
 
-  /**
-   * move_node
-   */
+  // ── batch_update_text ──────────────────────────────────────────────────────
   server.tool(
-    "move_node",
-    "Move a single node to new coordinates. For multiple nodes, use execute_js instead.",
+    "batch_update_text",
+    [
+      "Update text content and typography on multiple TEXT nodes in a single all-or-nothing batch.",
+      "All target nodes must be TEXT type and inside the scope subtree.",
+    ].join(" "),
     {
-      node_id: z.string().describe("Figma node ID"),
-      x: z.number().describe("New X position"),
-      y: z.number().describe("New Y position"),
+      ...batchCommon,
+      operations: z
+        .array(
+          z.object({
+            node_id: z.string().describe("Target TEXT node ID — must be inside scope"),
+            characters: z.string().describe("New text content"),
+            font_size: z.number().optional().describe("Font size in pixels"),
+            font_name: z
+              .object({ family: z.string(), style: z.string() })
+              .optional()
+              .describe('Font family and style e.g. { family: "Inter", style: "Bold" }'),
+          })
+        )
+        .max(100)
+        .describe("Operations to execute — max 100"),
     },
-    async ({ node_id, x, y }) => {
-      const result = await bridge.sendCommand("MOVE_NODE", { nodeId: node_id, x, y });
+    async ({ file_key, scope_node_id, operations }) => {
+      const result = await bridge.sendCommand("BATCH_UPDATE_TEXT", {
+        fileKey: file_key,
+        scopeNodeId: scope_node_id,
+        operations,
+      });
       return { content: [{ type: "text" as const, text: toText(result) }] };
     }
   );
 
-  /**
-   * resize_node
-   */
+  // ── batch_update_fills_strokes_effects ─────────────────────────────────────
   server.tool(
-    "resize_node",
-    "Resize a single node. For multiple nodes, use execute_js instead.",
+    "batch_update_fills_strokes_effects",
+    [
+      "Update fills, strokes, and effects on multiple nodes in a single all-or-nothing batch.",
+      "All target nodes must be inside the scope subtree and support the modified properties.",
+    ].join(" "),
     {
-      node_id: z.string().describe("Figma node ID"),
-      width: z.number().describe("New width in pixels"),
-      height: z.number().describe("New height in pixels"),
+      ...batchCommon,
+      operations: z
+        .array(
+          z.object({
+            node_id: z.string().describe("Target node ID — must be inside scope"),
+            fills: z.array(PaintSchema).optional().describe("Array of fill paints"),
+            strokes: z.array(PaintSchema).optional().describe("Array of stroke paints"),
+            stroke_weight: z.number().optional().describe("Stroke weight in pixels"),
+            effects: z.array(EffectSchema).optional().describe("Array of effects"),
+          })
+        )
+        .max(100)
+        .describe("Operations to execute — max 100"),
     },
-    async ({ node_id, width, height }) => {
-      const result = await bridge.sendCommand("RESIZE_NODE", { nodeId: node_id, width, height });
+    async ({ file_key, scope_node_id, operations }) => {
+      const result = await bridge.sendCommand("BATCH_UPDATE_FILLS_STROKES_EFFECTS", {
+        fileKey: file_key,
+        scopeNodeId: scope_node_id,
+        operations,
+      });
       return { content: [{ type: "text" as const, text: toText(result) }] };
     }
   );
 
-  /**
-   * delete_node
-   */
+  // ── batch_bind_variables ───────────────────────────────────────────────────
   server.tool(
-    "delete_node",
-    "Delete a node from Figma. This is irreversible — use carefully.",
+    "batch_bind_variables",
+    [
+      "Bind or unbind Figma variables to node properties in a single all-or-nothing batch.",
+      "All target nodes must be inside the scope subtree.",
+      "Set variable_id to null to unbind a property.",
+    ].join(" "),
     {
-      node_id: z.string().describe("Figma node ID to delete"),
+      ...batchCommon,
+      operations: z
+        .array(
+          z.object({
+            node_id: z.string().describe("Target node ID — must be inside scope"),
+            bindings: z.array(
+              z.object({
+                property: z
+                  .string()
+                  .describe("Node property to bind e.g. 'opacity', 'width', 'height'"),
+                variable_id: z
+                  .string()
+                  .nullable()
+                  .describe("Variable ID to bind, or null to unbind"),
+              })
+            ).describe("List of property-variable bindings"),
+          })
+        )
+        .max(100)
+        .describe("Operations to execute — max 100"),
     },
-    async ({ node_id }) => {
-      const result = await bridge.sendCommand("DELETE_NODE", { nodeId: node_id });
+    async ({ file_key, scope_node_id, operations }) => {
+      const result = await bridge.sendCommand("BATCH_BIND_VARIABLES", {
+        fileKey: file_key,
+        scopeNodeId: scope_node_id,
+        operations,
+      });
       return { content: [{ type: "text" as const, text: toText(result) }] };
     }
   );
 
-  /**
-   * clone_node
-   */
+  // ── batch_update_component_properties ─────────────────────────────────────
   server.tool(
-    "clone_node",
-    "Clone a single node. For cloning 2+ nodes, use batch_clone or execute_js instead.",
+    "batch_update_component_properties",
+    [
+      "Update exposed component properties on INSTANCE nodes in a single all-or-nothing batch.",
+      "All target nodes must be INSTANCE type and inside the scope subtree.",
+      "Modifies instance overrides, not the source component definition.",
+    ].join(" "),
     {
-      node_id: z.string().describe("Figma node ID to clone"),
-      parent_id: z.string().optional().describe("Parent frame/group node ID (default: current page)"),
-      x: z.number().optional().describe("X position of the clone"),
-      y: z.number().optional().describe("Y position of the clone"),
+      ...batchCommon,
+      operations: z
+        .array(
+          z.object({
+            node_id: z.string().describe("Target INSTANCE node ID — must be inside scope"),
+            properties: z
+              .record(z.string(), z.unknown())
+              .describe("Component property values to set e.g. { 'Button Text': 'Submit' }"),
+          })
+        )
+        .max(100)
+        .describe("Operations to execute — max 100"),
     },
-    async ({ node_id, parent_id, x, y }) => {
-      const result = await bridge.sendCommand("CLONE_NODE", { nodeId: node_id, parentId: parent_id, x, y });
+    async ({ file_key, scope_node_id, operations }) => {
+      const result = await bridge.sendCommand("BATCH_UPDATE_COMPONENT_PROPERTIES", {
+        fileKey: file_key,
+        scopeNodeId: scope_node_id,
+        operations,
+      });
       return { content: [{ type: "text" as const, text: toText(result) }] };
     }
   );
 
-  /**
-   * create_instance
-   */
+  // ── batch_reorder_move ─────────────────────────────────────────────────────
   server.tool(
-    "create_instance",
-    "Create a single instance of a Figma COMPONENT. For multiple instances, use execute_js instead.",
+    "batch_reorder_move",
+    [
+      "Reorder and/or reparent nodes in a single all-or-nothing batch.",
+      "All source nodes must be inside scope.",
+      "New parent (if provided) must also be inside scope and satisfy parent policy.",
+    ].join(" "),
     {
-      component_id: z.string().describe("Component node ID (must be type COMPONENT, not INSTANCE)"),
-      parent_id: z.string().optional().describe("Parent frame/group node ID (default: current page)"),
-      x: z.number().optional().describe("X position"),
-      y: z.number().optional().describe("Y position"),
+      ...batchCommon,
+      operations: z
+        .array(
+          z.object({
+            node_id: z.string().describe("Node to reorder/reparent — must be inside scope"),
+            new_parent_node_id: z
+              .string()
+              .optional()
+              .describe("New parent node ID — must be inside scope and satisfy parent policy"),
+            new_index: z
+              .number()
+              .int()
+              .min(0)
+              .optional()
+              .describe("Target index within new (or current) parent (0 = front/bottom)"),
+            x: z.number().optional().describe("New X position after move"),
+            y: z.number().optional().describe("New Y position after move"),
+          })
+        )
+        .max(100)
+        .describe("Operations to execute — max 100"),
     },
-    async ({ component_id, parent_id, x, y }) => {
-      const result = await bridge.sendCommand("CREATE_INSTANCE", { componentId: component_id, parentId: parent_id, x, y });
+    async ({ file_key, scope_node_id, operations }) => {
+      const result = await bridge.sendCommand("BATCH_REORDER_MOVE", {
+        fileKey: file_key,
+        scopeNodeId: scope_node_id,
+        operations,
+      });
       return { content: [{ type: "text" as const, text: toText(result) }] };
     }
   );
 
-  /**
-   * append_child
-   */
-  server.tool(
-    "append_child",
-    "Reparent a single node into a different frame or group. For multiple nodes, use execute_js instead.",
-    {
-      node_id: z.string().describe("Node ID to reparent"),
-      parent_id: z.string().describe("Target parent frame/group node ID"),
-      x: z.number().optional().describe("X position relative to new parent"),
-      y: z.number().optional().describe("Y position relative to new parent"),
-    },
-    async ({ node_id, parent_id, x, y }) => {
-      const result = await bridge.sendCommand("APPEND_CHILD", { nodeId: node_id, parentId: parent_id, x, y });
-      return { content: [{ type: "text" as const, text: toText(result) }] };
-    }
-  );
+  // ── execute_js (UNSAFE_MODE only) ──────────────────────────────────────────
+  if (unsafeMode) {
+    server.tool(
+      "execute_js",
+      [
+        "⚠️  Developer mode only — executes arbitrary JavaScript in the Figma plugin sandbox.",
+        "Only available when UNSAFE_MODE=true is set on the MCP server.",
+        "The `figma` global is injected. Use `return` to send back a result.",
+        "Bypasses all safe-mode restrictions (scope, parent policy, destructive operation guards).",
+      ].join("\n"),
+      {
+        code: z.string().describe(
+          "JS code to execute in the Figma plugin sandbox. `figma` is injected."
+        ),
+      },
+      async ({ code }) => {
+        const result = await bridge.sendCommand("EXECUTE_JS", {
+          code,
+          unsafeMode: true,
+        });
+        return { content: [{ type: "text" as const, text: toText(result) }] };
+      }
+    );
+  }
 }

@@ -1,0 +1,11 @@
+{
+  "activeTask": "ATL-503",
+  "epicKey": "ATL-500",
+  "branch": "feature/ATL-503",
+  "project": "ATL",
+  "summary": "[figma-custom-mcp] 회귀 테스트 실행",
+  "completedSteps": ["start", "impl", "done", "review"],
+  "status": "완료",
+  "startedAt": "2026-06-23",
+  "previousTask": "ATL-502"
+}

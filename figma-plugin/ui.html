@@ -71,7 +71,7 @@
           const msg = JSON.parse(event.data);
           cmdCount++;
           addLog(`← ${msg.type} #${cmdCount}`);
-          parent.postMessage({ pluginMessage: msg }, "*");
+          parent.postMessage({ pluginMessage: msg }, "https://www.figma.com");
         } catch {}
       };
     }

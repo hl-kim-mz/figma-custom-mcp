@@ -1,0 +1,19 @@
+{
+  "_comment": "ATL-502 REST test config — do NOT commit",
+  "figma": {
+    "token": "YOUR_FIGMA_PERSONAL_ACCESS_TOKEN",
+    "testFileKey": "ITUDY018yehHwX5iwwTUXD",
+    "testPageName": "Design",
+    "testFrameName": "시안A",
+    "testNodeName": "GNB",
+    "testScopeNodeId": "205:40648"
+  },
+  "mcp": {
+    "wsPort": 3055,
+    "unsafeMode": false
+  },
+  "timeouts": {
+    "restApiMs": 10000,
+    "bridgeMs": 5000
+  }
+}

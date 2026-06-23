@@ -291,4 +291,60 @@ export function registerReadTools(server: McpServer, figma: FigmaRestClient, bri
       };
     }
   );
+
+  /**
+   * inspect_scope_tree
+   * Read-only scope tree inspection. Returns scope root info, descendant count,
+   * instance/component markers, and optionally allowed parent candidates.
+   */
+  server.tool(
+    "inspect_scope_tree",
+    [
+      "Read-only helper to inspect a scope subtree before writing.",
+      "Returns scope root info, descendant count, instance boundaries, and local/external component markers.",
+      "Use include_allowed_parents=true to see which nodes can receive new children.",
+      "Helps diagnose OUT_OF_SCOPE_NODE and INVALID_PARENT_NODE errors.",
+      "Always includes timing metrics.",
+    ].join(" "),
+    {
+      file_key: z.string().describe(
+        "Figma file key — must match the currently open file"
+      ),
+      scope_node_id: z.string().describe(
+        "ID of the scope root node (must be FRAME or SECTION)"
+      ),
+      include_allowed_parents: z
+        .boolean()
+        .optional()
+        .describe("Include isAllowedParent flag on each node (default: false)"),
+      max_depth: z
+        .number()
+        .int()
+        .min(1)
+        .max(10)
+        .optional()
+        .describe("Tree depth to traverse (default: 3, max: 10)"),
+    },
+    async ({ file_key, scope_node_id, include_allowed_parents = false, max_depth = 3 }) => {
+      if (!bridge?.isConnected) {
+        return {
+          content: [{
+            type: "text" as const,
+            text: JSON.stringify({
+              status: "error",
+              code: "BRIDGE_NOT_CONNECTED",
+              message: "Bridge Plugin not connected. Open Figma and run the Bridge Plugin.",
+            }),
+          }],
+        };
+      }
+      const result = await bridge.sendCommand("GET_SCOPE_TREE", {
+        fileKey: file_key,
+        scopeNodeId: scope_node_id,
+        includeAllowedParents: include_allowed_parents,
+        maxDepth: max_depth,
+      });
+      return { content: [{ type: "text" as const, text: JSON.stringify(result, null, 2) }] };
+    }
+  );
 }
