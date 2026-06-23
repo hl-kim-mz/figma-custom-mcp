@@ -7,9 +7,13 @@ import { registerWriteTools } from "./tools/write.js";
 
 const FIGMA_TOKEN = process.env.FIGMA_TOKEN ?? "";
 const WS_PORT = parseInt(process.env.WS_PORT ?? "3055", 10);
+const UNSAFE_MODE = process.env.UNSAFE_MODE === "true";
 
 if (!FIGMA_TOKEN) {
   process.stderr.write("[figma-custom-mcp] WARNING: FIGMA_TOKEN not set — read tools will fail.\n");
+}
+if (UNSAFE_MODE) {
+  process.stderr.write("[figma-custom-mcp] WARNING: UNSAFE_MODE enabled — execute_js is active. Use only in trusted developer environments.\n");
 }
 
 const server = new McpServer({
@@ -25,7 +29,7 @@ bridge.start();
 
 // Register all tools
 registerReadTools(server, figmaClient, bridge);
-registerWriteTools(server, bridge);
+registerWriteTools(server, bridge, { unsafeMode: UNSAFE_MODE });
 
 // Connect via stdio transport (used by Claude Code MCP)
 const transport = new StdioServerTransport();

@@ -1,0 +1,19 @@
+{
+  "_comment": "Copy to test-config.json and fill in your values. Do NOT commit test-config.json.",
+  "figma": {
+    "token": "figd_YOUR_TOKEN_HERE",
+    "testFileKey": "YOUR_TEST_FILE_KEY",
+    "testPageName": "QA Test Page",
+    "testFrameName": "TC Frame",
+    "testNodeName": "Button",
+    "testScopeNodeId": "SCOPE_FRAME_NODE_ID"
+  },
+  "mcp": {
+    "wsPort": 3055,
+    "unsafeMode": false
+  },
+  "timeouts": {
+    "restApiMs": 10000,
+    "bridgeMs": 5000
+  }
+}
